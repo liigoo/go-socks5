@@ -4,114 +4,772 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SOCKS5 代理服务器监控</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; background: #f5f5f5; padding: 20px; }
-        .container { max-width: 1400px; margin: 0 auto; }
-        h1 { color: #333; margin-bottom: 30px; }
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin-bottom: 30px; }
-        .stat-card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        .stat-card h3 { color: #666; font-size: 14px; margin-bottom: 10px; }
-        .stat-card .value { font-size: 28px; font-weight: bold; color: #2196F3; }
-        table { width: 100%; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        th { background: #2196F3; color: white; padding: 12px; text-align: left; }
-        td { padding: 12px; border-bottom: 1px solid #eee; }
-        tr:hover { background: #f5f5f5; }
-        .badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
-        .badge-active { background: #4CAF50; color: white; }
-        .refresh-btn { background: #2196F3; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; margin-bottom: 20px; }
-        .refresh-btn:hover { background: #1976D2; }
-        .rate-limit { color: #FF9800; }
-        .badge-blocked { background: #F44336; color: white; }
-        .btn-block { background: #F44336; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; }
-        .btn-block:hover { background: #D32F2F; }
-        .btn-unblock { background: #4CAF50; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; }
-        .btn-unblock:hover { background: #388E3C; }
-        .btn-block:disabled, .btn-unblock:disabled { opacity: 0.5; cursor: not-allowed; }
+        :root {
+            --primary-color: #00ab44;
+            --primary-dark: #008a33;
+            --secondary-color: #35414a;
+            --background-color: #f8f9fa;
+            --card-bg: #ffffff;
+            --text-color: #333333;
+            --text-light: #666666;
+            --border-color: #e1e4e8;
+            --success-color: #28a745;
+            --warning-color: #ffc107;
+            --danger-color: #dc3545;
+            --info-color: #17a2b8;
+            --shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+            --transition: all 0.3s ease;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--background-color);
+            color: var(--text-color);
+            line-height: 1.6;
+        }
+
+        .header {
+            background: linear-gradient(135deg, var(--secondary-color), #2c3e50);
+            color: white;
+            padding: 1.5rem 2rem;
+            box-shadow: var(--shadow);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .header-content {
+            max-width: 1400px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo i {
+            font-size: 2rem;
+            color: var(--primary-color);
+        }
+
+        .logo h1 {
+            font-size: 1.8rem;
+            font-weight: 600;
+        }
+
+        .controls {
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+        }
+
+        .refresh-btn {
+            background: var(--primary-color);
+            color: white;
+            border: none;
+            padding: 0.6rem 1.2rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            transition: var(--transition);
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        .refresh-btn:hover {
+            background: var(--primary-dark);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+        }
+
+        .refresh-btn:active {
+            transform: translateY(0);
+        }
+
+        .last-update {
+            font-size: 0.9rem;
+            opacity: 0.9;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 2rem auto;
+            padding: 0 1.5rem;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .stat-card {
+            background: var(--card-bg);
+            border-radius: 10px;
+            padding: 1.5rem;
+            box-shadow: var(--shadow);
+            transition: var(--transition);
+            border: 1px solid var(--border-color);
+        }
+
+        .stat-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
+        }
+
+        .stat-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+
+        .stat-icon {
+            width: 50px;
+            height: 50px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+        }
+
+        .icon-sessions {
+            background: rgba(0, 171, 68, 0.15);
+            color: var(--primary-color);
+        }
+
+        .icon-users {
+            background: rgba(23, 162, 184, 0.15);
+            color: var(--info-color);
+        }
+
+        .icon-chart {
+            background: rgba(0, 171, 68, 0.15);
+            color: var(--primary-color);
+        }
+
+        .chart-card {
+            margin-bottom: 2rem;
+        }
+
+        .chart-card .chart-wrapper {
+            margin-top: 0;
+        }
+
+        .stat-card h3 {
+            color: var(--text-light);
+            font-size: 1rem;
+            font-weight: 500;
+        }
+
+        .stat-card .value {
+            font-size: 2.2rem;
+            font-weight: 700;
+            color: var(--text-color);
+            margin: 0.5rem 0;
+        }
+
+        .stat-card .trend {
+            font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .trend-up {
+            color: var(--success-color);
+        }
+
+        .trend-down {
+            color: var(--danger-color);
+        }
+
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin: 2.5rem 0 1.5rem 0;
+            padding-bottom: 0.8rem;
+            border-bottom: 2px solid var(--border-color);
+        }
+
+        .section-header h2 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: var(--secondary-color);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .section-actions {
+            display: flex;
+            gap: 10px;
+        }
+
+        table {
+            width: 100%;
+            background: var(--card-bg);
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: var(--shadow);
+            border-collapse: collapse;
+        }
+
+        thead {
+            background: var(--secondary-color);
+        }
+
+        th {
+            color: white;
+            padding: 1rem 1.2rem;
+            text-align: left;
+            font-weight: 500;
+            font-size: 0.9rem;
+        }
+
+        tbody tr {
+            border-bottom: 1px solid var(--border-color);
+            transition: var(--transition);
+        }
+
+        tbody tr:hover {
+            background-color: rgba(0, 171, 68, 0.03);
+        }
+
+        td {
+            padding: 1rem 1.2rem;
+            font-size: 0.95rem;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 0.3rem 0.8rem;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            text-align: center;
+            min-width: 80px;
+        }
+
+        .badge-active {
+            background: rgba(40, 167, 69, 0.15);
+            color: var(--success-color);
+        }
+
+        .badge-blocked {
+            background: rgba(220, 53, 69, 0.15);
+            color: var(--danger-color);
+        }
+
+        .badge-warning {
+            background: rgba(255, 193, 7, 0.15);
+            color: var(--warning-color);
+        }
+
+        .targets-cell {
+            max-width: 200px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .btn {
+            padding: 0.4rem 0.9rem;
+            border-radius: 6px;
+            border: none;
+            font-size: 0.85rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: var(--transition);
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .btn-block {
+            background: var(--danger-color);
+            color: white;
+        }
+
+        .btn-block:hover {
+            background: #c82333;
+            transform: translateY(-2px);
+        }
+
+        .btn-unblock {
+            background: var(--success-color);
+            color: white;
+        }
+
+        .btn-unblock:hover {
+            background: #218838;
+            transform: translateY(-2px);
+        }
+
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .rate-value {
+            font-weight: 500;
+        }
+
+        .rate-limit {
+            color: var(--warning-color);
+            font-weight: 500;
+        }
+
+        .data-table-container {
+            overflow-x: auto;
+            border-radius: 10px;
+            margin-bottom: 2rem;
+        }
+
+        .footer {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-light);
+            font-size: 0.9rem;
+            margin-top: 2rem;
+        }
+
+        @media (max-width: 768px) {
+            .header-content {
+                flex-direction: column;
+                text-align: center;
+            }
+
+            .controls {
+                width: 100%;
+                justify-content: center;
+            }
+
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .section-header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 1rem;
+            }
+
+            th, td {
+                padding: 0.8rem;
+                font-size: 0.85rem;
+            }
+
+            .badge {
+                padding: 0.2rem 0.6rem;
+                font-size: 0.75rem;
+            }
+
+            .btn {
+                padding: 0.3rem 0.7rem;
+                font-size: 0.8rem;
+            }
+        }
+
+        .pulse {
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% {
+                box-shadow: 0 0 0 0 rgba(0, 171, 68, 0.4);
+            }
+            70% {
+                box-shadow: 0 0 0 10px rgba(0, 171, 68, 0);
+            }
+            100% {
+                box-shadow: 0 0 0 0 rgba(0, 171, 68, 0);
+            }
+        }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>SOCKS5 代理监控</h1>
-        <button class="refresh-btn" onclick="loadData()">🔄 刷新</button>
-        
-        <div class="stats-grid">
-            <div class="stat-card">
-                <h3>活跃会话</h3>
-                <div class="value" id="total-sessions">0</div>
+    <div class="header">
+        <div class="header-content">
+            <div class="logo">
+                <i class="fas fa-network-wired"></i>
+                <h1>SOCKS5 代理监控面板</h1>
             </div>
-            <div class="stat-card">
-                <h3>在线用户</h3>
-                <div class="value" id="online-users">0</div>
+            <div class="controls">
+                <button class="refresh-btn" onclick="loadData()">
+                    <i class="fas fa-sync-alt"></i>
+                    <span>刷新数据</span>
+                </button>
+                <div class="last-update" id="last-update">正在加载...</div>
             </div>
         </div>
-        
-        <h2 style="margin: 30px 0 15px 0;">用户统计</h2>
-        <table id="users-table">
-            <thead>
-                <tr>
-                    <th>用户名</th>
-                    <th>状态</th>
-                    <th>活跃会话</th>
-                    <th>总上传</th>
-                    <th>总下载</th>
-                    <th>上传速率</th>
-                    <th>下载速率</th>
-                    <th>访问地址</th>
-                    <th>操作</th>
-                </tr>
-            </thead>
-            <tbody id="users-tbody"></tbody>
-        </table>
-        
-        <h2 style="margin: 30px 0 15px 0;">会话详情</h2>
-        <table id="sessions-table">
-            <thead>
-                <tr>
-                    <th>会话ID</th>
-                    <th>用户</th>
-                    <th>客户端地址</th>
-                    <th>开始时间</th>
-                    <th>持续时间</th>
-                    <th>上传</th>
-                    <th>下载</th>
-                    <th>上传速率</th>
-                    <th>下载速率</th>
-                    <th>目标地址</th>
-                </tr>
-            </thead>
-            <tbody id="sessions-tbody"></tbody>
-        </table>
     </div>
-    
+
+    <div class="container">
+        <!-- 流量监控图表 -->
+        <div class="section-header">
+            <h2><i class="fas fa-chart-line"></i> 实时流量监控</h2>
+        </div>
+        <div class="stat-card chart-card">
+            <div class="chart-wrapper">
+                <canvas id="trafficChart" height="300"></canvas>
+            </div>
+        </div>
+
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-header">
+                    <h3>活跃会话</h3>
+                    <div class="stat-icon icon-sessions">
+                        <i class="fas fa-exchange-alt"></i>
+                    </div>
+                </div>
+                <div class="value" id="total-sessions">0</div>
+                <div class="trend trend-up">
+                    <i class="fas fa-arrow-up"></i>
+                    <span>实时监控中</span>
+                </div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-header">
+                    <h3>在线用户</h3>
+                    <div class="stat-icon icon-users">
+                        <i class="fas fa-users"></i>
+                    </div>
+                </div>
+                <div class="value" id="online-users">0</div>
+                <div class="trend trend-up">
+                    <i class="fas fa-arrow-up"></i>
+                    <span>实时监控中</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="section-header">
+            <h2><i class="fas fa-user-friends"></i> 用户统计</h2>
+        </div>
+
+        <div class="data-table-container">
+            <table id="users-table">
+                <thead>
+                    <tr>
+                        <th>用户名</th>
+                        <th>状态</th>
+                        <th>活跃会话</th>
+                        <th>总上传</th>
+                        <th>总下载</th>
+                        <th>上传速率</th>
+                        <th>下载速率</th>
+                        <th>访问地址</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="users-tbody">
+                    <tr>
+                        <td colspan="9" style="text-align: center; padding: 2rem;">
+                            <i class="fas fa-spinner fa-spin"></i> 正在加载数据...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="section-header">
+            <h2><i class="fas fa-network-wired"></i> IP统计</h2>
+        </div>
+
+        <div class="data-table-container">
+            <table id="ips-table">
+                <thead>
+                    <tr>
+                        <th>IP地址</th>
+                        <th>关联用户</th>
+                        <th>活跃会话</th>
+                        <th>总上传</th>
+                        <th>总下载</th>
+                        <th>上传速率</th>
+                        <th>下载速率</th>
+                        <th>访问地址</th>
+                    </tr>
+                </thead>
+                <tbody id="ips-tbody">
+                    <tr>
+                        <td colspan="8" style="text-align: center; padding: 2rem;">
+                            <i class="fas fa-spinner fa-spin"></i> 正在加载数据...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="section-header">
+            <h2><i class="fas fa-stream"></i> 会话详情</h2>
+        </div>
+
+        <div class="data-table-container">
+            <table id="sessions-table">
+                <thead>
+                    <tr>
+                        <th>会话ID</th>
+                        <th>用户</th>
+                        <th>客户端地址</th>
+                        <th>开始时间</th>
+                        <th>持续时间</th>
+                        <th>上传</th>
+                        <th>下载</th>
+                        <th>上传速率</th>
+                        <th>下载速率</th>
+                        <th>目标地址</th>
+                    </tr>
+                </thead>
+                <tbody id="sessions-tbody">
+                    <tr>
+                        <td colspan="10" style="text-align: center; padding: 2rem;">
+                            <i class="fas fa-spinner fa-spin"></i> 正在加载数据...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="footer">
+        <p>SOCKS5 代理服务器监控面板 &copy; 2025</p>
+    </div>
+
     <script>
+        // 全局变量
+        let trafficChart = null;
+        let chartData = {
+            labels: [],
+            datasets: [
+                {
+                    label: '上传速率',
+                    data: [],
+                    borderColor: '#00ab44',
+                    backgroundColor: 'rgba(0, 171, 68, 0.1)',
+                    tension: 0.4,
+                    fill: true
+                },
+                {
+                    label: '下载速率',
+                    data: [],
+                    borderColor: '#35414a',
+                    backgroundColor: 'rgba(53, 65, 74, 0.1)',
+                    tension: 0.4,
+                    fill: true
+                }
+            ]
+        };
+        
+        // 当前使用的单位（KB/s, MB/s, GB/s）
+        let currentUnit = 'KB/s';
+        let currentUnitScale = 1024; // 将字节转换为当前单位的倍数
+
+        // 格式化字节大小
         function formatBytes(bytes) {
             if (bytes < 1024) return bytes + ' B';
             if (bytes < 1024*1024) return (bytes/1024).toFixed(2) + ' KB';
             if (bytes < 1024*1024*1024) return (bytes/(1024*1024)).toFixed(2) + ' MB';
             return (bytes/(1024*1024*1024)).toFixed(2) + ' GB';
         }
-        
+
+        // 格式化速率
         function formatRate(bytesPerSec) {
             return formatBytes(bytesPerSec) + '/s';
         }
+
+        // 根据数据范围自动选择单位
+        function autoSelectUnit(maxRate) {
+            if (maxRate >= 1024 * 1024 * 1024) {
+                // GB/s
+                return { unit: 'GB/s', scale: 1024 * 1024 * 1024 };
+            } else if (maxRate >= 1024 * 1024) {
+                // MB/s
+                return { unit: 'MB/s', scale: 1024 * 1024 };
+            } else if (maxRate >= 1024) {
+                // KB/s
+                return { unit: 'KB/s', scale: 1024 };
+            } else {
+                // B/s
+                return { unit: 'B/s', scale: 1 };
+            }
+        }
         
+        // 初始化流量图表
+        function initTrafficChart() {
+            const ctx = document.getElementById('trafficChart').getContext('2d');
+            trafficChart = new Chart(ctx, {
+                type: 'line',
+                data: chartData,
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            title: {
+                                display: true,
+                                text: '速率 (KB/s)'
+                            },
+                            ticks: {
+                                callback: function(value) {
+                                    return value + ' ' + currentUnit;
+                                }
+                            }
+                        },
+                        x: {
+                            title: {
+                                display: true,
+                                text: '时间'
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            position: 'top',
+                        },
+                        tooltip: {
+                            mode: 'index',
+                            intersect: false,
+                            callbacks: {
+                                label: function(context) {
+                                    let label = context.dataset.label || '';
+                                    if (label) {
+                                        label += ': ';
+                                    }
+                                    label += context.parsed.y.toFixed(2) + ' ' + currentUnit;
+                                    return label;
+                                }
+                            }
+                        }
+                    },
+                    interaction: {
+                        mode: 'nearest',
+                        axis: 'x',
+                        intersect: false
+                    }
+                }
+            });
+        }
+
+        // 更新流量图表数据
+        function updateTrafficChart(uploadRate, downloadRate) {
+            const now = new Date();
+            const timeLabel = now.toLocaleTimeString('zh-CN');
+
+            // 计算当前数据点中的最大速率，用于自动调整单位
+            let maxRate = Math.max(uploadRate, downloadRate);
+            
+            // 如果有历史数据，也考虑历史数据的最大值
+            if (chartData.datasets[0].data.length > 0) {
+                const maxHistorical = Math.max(
+                    ...chartData.datasets[0].data.map(v => v * currentUnitScale),
+                    ...chartData.datasets[1].data.map(v => v * currentUnitScale)
+                );
+                maxRate = Math.max(maxRate, maxHistorical);
+            }
+            
+            // 自动选择单位
+            const unitInfo = autoSelectUnit(maxRate);
+            const newUnit = unitInfo.unit;
+            const newScale = unitInfo.scale;
+            
+            // 如果单位发生变化，需要转换所有历史数据
+            if (newUnit !== currentUnit) {
+                const scaleRatio = currentUnitScale / newScale;
+                chartData.datasets[0].data = chartData.datasets[0].data.map(v => v * scaleRatio);
+                chartData.datasets[1].data = chartData.datasets[1].data.map(v => v * scaleRatio);
+                currentUnit = newUnit;
+                currentUnitScale = newScale;
+                
+                // 更新图表配置
+                trafficChart.options.scales.y.title.text = '速率 (' + currentUnit + ')';
+                trafficChart.options.scales.y.ticks.callback = function(value) {
+                    return value.toFixed(2) + ' ' + currentUnit;
+                };
+                
+                // 更新数据集标签
+                chartData.datasets[0].label = '上传速率 (' + currentUnit + ')';
+                chartData.datasets[1].label = '下载速率 (' + currentUnit + ')';
+            }
+
+            // 添加新数据点（转换为当前单位）
+            chartData.labels.push(timeLabel);
+            chartData.datasets[0].data.push(uploadRate / currentUnitScale);
+            chartData.datasets[1].data.push(downloadRate / currentUnitScale);
+
+            // 保持最多20个数据点
+            if (chartData.labels.length > 20) {
+                chartData.labels.shift();
+                chartData.datasets[0].data.shift();
+                chartData.datasets[1].data.shift();
+            }
+
+            // 更新图表
+            trafficChart.update();
+        }
+
+        // 刷新图表
+        function refreshChart() {
+            loadData();
+        }
+
         let blockedUsers = [];
-        
+        let lastUpdateTime = null;
+
+        function updateLastUpdateTime() {
+            const now = new Date();
+            lastUpdateTime = now;
+            document.getElementById('last-update').textContent =
+                '最后更新: ' + now.toLocaleTimeString('zh-CN');
+        }
+
         function loadBlockedUsers() {
             fetch('/api/blocked')
                 .then(r => r.json())
                 .then(data => {
                     blockedUsers = data.blocked_users || [];
                     loadData();
+                })
+                .catch(err => {
+                    console.error('加载阻断用户列表失败:', err);
                 });
         }
-        
+
         function blockUser(username) {
             if (!confirm('确定要阻断用户 ' + username + ' 吗？该用户的所有代理连接将被立即中断！')) {
                 return;
             }
-            
+
+            const btn = event.target;
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+            btn.disabled = true;
+
             fetch('/api/block?username=' + encodeURIComponent(username), { method: 'POST' })
                 .then(r => r.json())
                 .then(data => {
@@ -120,18 +778,27 @@
                         loadBlockedUsers();
                     } else {
                         alert('操作失败：' + (data.message || '未知错误'));
+                        btn.innerHTML = originalText;
+                        btn.disabled = false;
                     }
                 })
                 .catch(err => {
                     alert('操作失败：' + err);
+                    btn.innerHTML = originalText;
+                    btn.disabled = false;
                 });
         }
-        
+
         function unblockUser(username) {
             if (!confirm('确定要解除用户 ' + username + ' 的阻断吗？')) {
                 return;
             }
-            
+
+            const btn = event.target;
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+            btn.disabled = true;
+
             fetch('/api/unblock?username=' + encodeURIComponent(username), { method: 'POST' })
                 .then(r => r.json())
                 .then(data => {
@@ -140,44 +807,93 @@
                         loadBlockedUsers();
                     } else {
                         alert('操作失败：' + (data.message || '未知错误'));
+                        btn.innerHTML = originalText;
+                        btn.disabled = false;
                     }
                 })
                 .catch(err => {
                     alert('操作失败：' + err);
+                    btn.innerHTML = originalText;
+                    btn.disabled = false;
                 });
         }
-        
+
         function loadData() {
-            // 加载用户统计
+            // 加载用户统计和IP统计
             fetch('/api/users')
                 .then(r => r.json())
                 .then(data => {
-                    const tbody = document.getElementById('users-tbody');
-                    tbody.innerHTML = '';
+                    // 更新用户统计
+                    const usersTbody = document.getElementById('users-tbody');
+                    usersTbody.innerHTML = '';
                     document.getElementById('online-users').textContent = data.users.length;
-                    
-                    data.users.forEach(user => {
-                        const isBlocked = blockedUsers.includes(user.username);
-                        const tr = document.createElement('tr');
-                        tr.innerHTML = `
-                            <td>${user.username}</td>
-                            <td><span class="badge ${isBlocked ? 'badge-blocked' : 'badge-active'}">${isBlocked ? '已阻断' : '正常'}</span></td>
-                            <td><span class="badge badge-active">${user.active_sessions}</span></td>
-                            <td>${formatBytes(user.total_upload)}</td>
-                            <td>${formatBytes(user.total_download)}</td>
-                            <td>${formatRate(user.upload_rate)}</td>
-                            <td>${formatRate(user.download_rate)}</td>
-                            <td>${user.targets.join(', ') || '-'}</td>
-                            <td>
-                                ${isBlocked 
-                                    ? '<button class="btn-unblock" onclick="unblockUser(\'' + user.username + '\')">解除阻断</button>'
-                                    : '<button class="btn-block" onclick="blockUser(\'' + user.username + '\')">阻断</button>'}
-                            </td>
-                        `;
-                        tbody.appendChild(tr);
-                    });
+
+                    if (data.users.length === 0) {
+                        usersTbody.innerHTML = '<tr><td colspan="9" style="text-align: center; padding: 2rem;">暂无用户数据</td></tr>';
+                    } else {
+                        // 计算总上传和下载速率用于图表
+                        let totalUploadRate = 0;
+                        let totalDownloadRate = 0;
+
+                        data.users.forEach(user => {
+                            totalUploadRate += user.upload_rate || 0;
+                            totalDownloadRate += user.download_rate || 0;
+
+                            const isBlocked = blockedUsers.includes(user.username);
+                            const tr = document.createElement('tr');
+                            tr.innerHTML = `
+                                <td><strong>${user.username}</strong></td>
+                                <td><span class="badge ${isBlocked ? 'badge-blocked' : 'badge-active'}">${isBlocked ? '已阻断' : '正常'}</span></td>
+                                <td><span class="badge badge-active">${user.active_sessions}</span></td>
+                                <td>${formatBytes(user.total_upload)}</td>
+                                <td>${formatBytes(user.total_download)}</td>
+                                <td class="rate-value">${formatRate(user.upload_rate)}</td>
+                                <td class="rate-value">${formatRate(user.download_rate)}</td>
+                                <td class="targets-cell">${user.targets.join(', ') || '-'}</td>
+                                <td>
+                                    ${isBlocked
+                                        ? '<button class="btn btn-unblock" onclick="unblockUser(\'' + user.username + '\')"><i class="fas fa-unlock"></i> 解除</button>'
+                                        : '<button class="btn btn-block" onclick="blockUser(\'' + user.username + '\')"><i class="fas fa-ban"></i> 阻断</button>'}
+                                </td>
+                            `;
+                            usersTbody.appendChild(tr);
+                        });
+
+                        // 更新流量图表
+                        updateTrafficChart(totalUploadRate, totalDownloadRate);
+                    }
+
+                    // 更新IP统计
+                    const ipsTbody = document.getElementById('ips-tbody');
+                    ipsTbody.innerHTML = '';
+
+                    if (data.ips && data.ips.length > 0) {
+                        data.ips.forEach(ip => {
+                            const tr = document.createElement('tr');
+                            tr.innerHTML = `
+                                <td><strong>${ip.ip}</strong></td>
+                                <td>${ip.username || 'anonymous'}</td>
+                                <td><span class="badge badge-active">${ip.active_sessions}</span></td>
+                                <td>${formatBytes(ip.total_upload)}</td>
+                                <td>${formatBytes(ip.total_download)}</td>
+                                <td class="rate-value">${formatRate(ip.upload_rate)}</td>
+                                <td class="rate-value">${formatRate(ip.download_rate)}</td>
+                                <td class="targets-cell">${ip.targets.join(', ') || '-'}</td>
+                            `;
+                            ipsTbody.appendChild(tr);
+                        });
+                    } else {
+                        ipsTbody.innerHTML = '<tr><td colspan="8" style="text-align: center; padding: 2rem;">暂无IP数据</td></tr>';
+                    }
+                })
+                .catch(err => {
+                    console.error('加载用户统计失败:', err);
+                    document.getElementById('users-tbody').innerHTML =
+                        '<tr><td colspan="9" style="text-align: center; padding: 2rem; color: #dc3545;">加载数据失败: ' + err.message + '</td></tr>';
+                    document.getElementById('ips-tbody').innerHTML =
+                        '<tr><td colspan="8" style="text-align: center; padding: 2rem; color: #dc3545;">加载数据失败: ' + err.message + '</td></tr>';
                 });
-            
+
             // 加载会话详情
             fetch('/api/sessions')
                 .then(r => r.json())
@@ -185,30 +901,54 @@
                     const tbody = document.getElementById('sessions-tbody');
                     tbody.innerHTML = '';
                     document.getElementById('total-sessions').textContent = data.total_sessions;
-                    
+
+                    if (data.sessions.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="10" style="text-align: center; padding: 2rem;">暂无会话数据</td></tr>';
+                        return;
+                    }
+
                     data.sessions.forEach(sess => {
                         const tr = document.createElement('tr');
                         tr.innerHTML = `
-                            <td>#${sess.id}</td>
+                            <td><span class="badge badge-warning">#${sess.id}</span></td>
                             <td>${sess.username || 'anonymous'}</td>
                             <td>${sess.client_addr}</td>
                             <td>${new Date(sess.start_time).toLocaleString()}</td>
                             <td>${sess.duration}</td>
                             <td>${formatBytes(sess.upload_bytes || 0)}</td>
                             <td>${formatBytes(sess.download_bytes || 0)}</td>
-                            <td>${formatRate(sess.upload_rate || 0)}</td>
-                            <td>${formatRate(sess.download_rate || 0)}</td>
-                            <td>${(sess.targets || []).join(', ') || '-'}</td>
+                            <td class="rate-value">${formatRate(sess.upload_rate || 0)}</td>
+                            <td class="rate-value">${formatRate(sess.download_rate || 0)}</td>
+                            <td class="targets-cell">${(sess.targets || []).join(', ') || '-'}</td>
                         `;
                         tbody.appendChild(tr);
                     });
+
+                    updateLastUpdateTime();
+                })
+                .catch(err => {
+                    console.error('加载会话详情失败:', err);
+                    document.getElementById('sessions-tbody').innerHTML =
+                        '<tr><td colspan="10" style="text-align: center; padding: 2rem; color: #dc3545;">加载数据失败: ' + err.message + '</td></tr>';
                 });
         }
-        
-        // 自动刷新
-        loadBlockedUsers();
-        setInterval(loadBlockedUsers, 3000);
+
+        // 初始化页面
+        document.addEventListener('DOMContentLoaded', function() {
+            initTrafficChart();
+            loadBlockedUsers();
+            loadData();
+
+            // 自动刷新数据
+            setInterval(() => {
+                loadData();
+            }, 5000);
+
+            // 每30秒更新阻断用户列表
+            setInterval(() => {
+                loadBlockedUsers();
+            }, 30000);
+        });
     </script>
 </body>
 </html>
-

@@ -60,9 +60,9 @@ const (
 
 	// 超时配置
 	DefaultConnectTimeout = 30 * time.Second
-	DefaultReadTimeout     = 5 * time.Minute
-	DefaultWriteTimeout    = 5 * time.Minute
-	DefaultIdleTimeout     = 10 * time.Minute
+	DefaultReadTimeout    = 5 * time.Minute
+	DefaultWriteTimeout   = 5 * time.Minute
+	DefaultIdleTimeout    = 10 * time.Minute
 )
 
 // User 用户结构体
@@ -98,7 +98,7 @@ func (um *UserManager) RemoveUser(username string) {
 func (um *UserManager) Check(username, password string) bool {
 	um.mu.RLock()
 	defer um.mu.RUnlock()
-	
+
 	if user, exists := um.users[username]; exists {
 		return user.Password == password
 	}
@@ -119,37 +119,38 @@ func (um *UserManager) GetUserCount() int {
 
 // Config 配置文件结构
 type Config struct {
-	Port       int              `json:"port"`
-	Auth       bool             `json:"auth"`
-	Users      []User           `json:"users"`
-	Allowed    []string         `json:"allowed"`
-	WebPort   int              `json:"web_port"`   // Web界面端口
-	RateLimits map[string]int64 `json:"rate_limits"` // 用户限速，单位：bytes/s
+	Port         int              `json:"port"`
+	Auth         bool             `json:"auth"`
+	AuthRequired bool             `json:"auth_required"` // 鉴权开关，控制是否强制进行认证
+	Users        []User           `json:"users"`
+	Allowed      []string         `json:"allowed"`
+	WebPort      int              `json:"web_port"`    // Web界面端口
+	RateLimits   map[string]int64 `json:"rate_limits"` // 用户限速，单位：bytes/s
 }
 
 // TrafficStats 流量统计
 type TrafficStats struct {
-	UploadBytes   int64     // 上行字节数
-	DownloadBytes int64     // 下行字节数
-	UploadRate    float64   // 上行速率 bytes/s
-	DownloadRate  float64   // 下行速率 bytes/s
-	LastUpdate    time.Time // 最后更新时间
-	Targets       []string  // 访问的目标地址列表
+	UploadBytes   int64           // 上行字节数
+	DownloadBytes int64           // 下行字节数
+	UploadRate    float64         // 上行速率 bytes/s
+	DownloadRate  float64         // 下行速率 bytes/s
+	LastUpdate    time.Time       // 最后更新时间
+	Targets       map[string]bool // 访问的目标地址列表 (修复：使用map提高查找效率)
 	mu            sync.RWMutex
 }
 
 // Session 会话结构体
 type Session struct {
-	ID           uint64
-	ClientConn   net.Conn
-	RemoteConn   net.Conn
-	ClientAddr   string
-	Username     string       // 登录用户名
-	StartTime    time.Time
-	Traffic      *TrafficStats // 流量统计
-	targetAddr   string        // 当前连接的目标地址
-	mu           sync.RWMutex
-	attrs        map[string]interface{}
+	ID         uint64
+	ClientConn net.Conn
+	RemoteConn net.Conn
+	ClientAddr string
+	Username   string // 登录用户名
+	StartTime  time.Time
+	Traffic    *TrafficStats // 流量统计
+	targetAddr string        // 当前连接的目标地址
+	mu         sync.RWMutex
+	attrs      map[string]interface{}
 }
 
 func NewSession(id uint64, conn net.Conn) *Session {
@@ -160,7 +161,7 @@ func NewSession(id uint64, conn net.Conn) *Session {
 		StartTime:  time.Now(),
 		Traffic: &TrafficStats{
 			LastUpdate: time.Now(),
-			Targets:    make([]string, 0),
+			Targets:    make(map[string]bool), // 修复：初始化为map
 		},
 		attrs: make(map[string]interface{}),
 	}
@@ -172,18 +173,9 @@ func (s *Session) AddTarget(target string) {
 	s.targetAddr = target
 	if s.Traffic != nil {
 		s.Traffic.mu.Lock()
-		// 检查是否已存在
-		exists := false
-		for _, t := range s.Traffic.Targets {
-			if t == target {
-				exists = true
-				break
-			}
-		}
-		if !exists {
-			s.Traffic.Targets = append(s.Traffic.Targets, target)
-		}
-		s.Traffic.mu.Unlock()
+		defer s.Traffic.mu.Unlock()
+		// 修复：使用map存储，避免重复
+		s.Traffic.Targets[target] = true
 	}
 }
 
@@ -198,12 +190,21 @@ func (s *Session) AddUpload(bytes int64) {
 		now := time.Now()
 		s.Traffic.mu.Lock()
 		s.Traffic.UploadBytes += bytes
-		// 计算速率
+		// 计算平均速率（每秒字节数）
 		if !s.Traffic.LastUpdate.IsZero() {
 			elapsed := now.Sub(s.Traffic.LastUpdate).Seconds()
 			if elapsed > 0 {
-				s.Traffic.UploadRate = float64(bytes) / elapsed
+				// 使用指数移动平均来平滑速率计算
+				currentRate := float64(bytes) / elapsed
+				if s.Traffic.UploadRate > 0 {
+					// 平滑因子0.5，平衡当前速率和历史速率
+					s.Traffic.UploadRate = 0.5*s.Traffic.UploadRate + 0.5*currentRate
+				} else {
+					s.Traffic.UploadRate = currentRate
+				}
 			}
+		} else {
+			s.Traffic.UploadRate = 0 // 初始化为0
 		}
 		s.Traffic.LastUpdate = now
 		s.Traffic.mu.Unlock()
@@ -215,12 +216,21 @@ func (s *Session) AddDownload(bytes int64) {
 		now := time.Now()
 		s.Traffic.mu.Lock()
 		s.Traffic.DownloadBytes += bytes
-		// 计算速率
+		// 计算平均速率（每秒字节数）
 		if !s.Traffic.LastUpdate.IsZero() {
 			elapsed := now.Sub(s.Traffic.LastUpdate).Seconds()
 			if elapsed > 0 {
-				s.Traffic.DownloadRate = float64(bytes) / elapsed
+				// 使用指数移动平均来平滑速率计算
+				currentRate := float64(bytes) / elapsed
+				if s.Traffic.DownloadRate > 0 {
+					// 平滑因子0.5，平衡当前速率和历史速率
+					s.Traffic.DownloadRate = 0.5*s.Traffic.DownloadRate + 0.5*currentRate
+				} else {
+					s.Traffic.DownloadRate = currentRate
+				}
 			}
+		} else {
+			s.Traffic.DownloadRate = 0 // 初始化为0
 		}
 		s.Traffic.LastUpdate = now
 		s.Traffic.mu.Unlock()
@@ -287,11 +297,11 @@ func (rl *RateLimiter) Allow(bytes int64) bool {
 	}
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	
+
 	now := time.Now()
 	elapsed := now.Sub(rl.lastTime).Seconds()
 	rl.lastTime = now
-	
+
 	// 添加令牌
 	if elapsed > 0 {
 		newTokens := int64(float64(rl.rate) * elapsed)
@@ -300,7 +310,7 @@ func (rl *RateLimiter) Allow(bytes int64) bool {
 			rl.tokens = rl.capacity
 		}
 	}
-	
+
 	// 检查是否有足够的令牌
 	if rl.tokens >= bytes {
 		rl.tokens -= bytes
@@ -320,24 +330,24 @@ func (rl *RateLimiter) Wait(bytes int64) {
 
 // SocketPipe 套接字管道，用于双向数据传输
 type SocketPipe struct {
-	conn1       net.Conn
-	conn2       net.Conn
-	running     bool
-	mu          sync.RWMutex
-	done        chan struct{} // 用于通知传输完成
-	wg          sync.WaitGroup // 等待所有传输完成
-	session     *Session       // 关联的会话，用于流量统计
-	uploadLimiter  *RateLimiter // 上行限速
-	downloadLimiter *RateLimiter // 下行限速
+	conn1           net.Conn
+	conn2           net.Conn
+	running         bool
+	mu              sync.RWMutex
+	done            chan struct{}  // 用于通知传输完成
+	wg              sync.WaitGroup // 等待所有传输完成
+	session         *Session       // 关联的会话，用于流量统计
+	uploadLimiter   *RateLimiter   // 上行限速
+	downloadLimiter *RateLimiter   // 下行限速
 }
 
 func NewSocketPipe(conn1, conn2 net.Conn, session *Session, uploadRate, downloadRate int64) *SocketPipe {
 	return &SocketPipe{
-		conn1:          conn1,
-		conn2:          conn2,
-		done:           make(chan struct{}),
-		session:        session,
-		uploadLimiter:  NewRateLimiter(uploadRate),
+		conn1:           conn1,
+		conn2:           conn2,
+		done:            make(chan struct{}),
+		session:         session,
+		uploadLimiter:   NewRateLimiter(uploadRate),
 		downloadLimiter: NewRateLimiter(downloadRate),
 	}
 }
@@ -369,11 +379,11 @@ func (sp *SocketPipe) Start() {
 func (sp *SocketPipe) Stop() {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
-	
+
 	if !sp.running {
 		return
 	}
-	
+
 	sp.running = false
 	if sp.conn1 != nil {
 		sp.conn1.Close()
@@ -396,7 +406,7 @@ func (sp *SocketPipe) Wait() {
 func (sp *SocketPipe) transfer(src, dst net.Conn, isClientToRemote bool) {
 	defer sp.wg.Done()
 	buffer := make([]byte, BufferSize)
-	
+
 	// 设置连接的keep-alive和初始超时
 	if tcpConn, ok := src.(*net.TCPConn); ok {
 		tcpConn.SetKeepAlive(true)
@@ -406,28 +416,28 @@ func (sp *SocketPipe) transfer(src, dst net.Conn, isClientToRemote bool) {
 		tcpConn.SetKeepAlive(true)
 		tcpConn.SetKeepAlivePeriod(30 * time.Second)
 	}
-	
+
 	var limiter *RateLimiter
 	if isClientToRemote {
 		limiter = sp.uploadLimiter // 客户端->服务器，上行
 	} else {
 		limiter = sp.downloadLimiter // 服务器->客户端，下行
 	}
-	
+
 	for {
 		sp.mu.RLock()
 		running := sp.running
 		sp.mu.RUnlock()
-		
+
 		if !running {
 			break
 		}
-		
+
 		// 设置读取超时（每次循环更新，避免长时间阻塞）
 		if tcpConn, ok := src.(*net.TCPConn); ok {
 			tcpConn.SetReadDeadline(time.Now().Add(DefaultReadTimeout))
 		}
-		
+
 		n, err := src.Read(buffer)
 		if err != nil {
 			if err != io.EOF && !strings.Contains(err.Error(), "use of closed network connection") && !strings.Contains(err.Error(), "i/o timeout") {
@@ -435,13 +445,13 @@ func (sp *SocketPipe) transfer(src, dst net.Conn, isClientToRemote bool) {
 			}
 			break
 		}
-		
+
 		if n > 0 {
 			// 限速
 			if limiter != nil {
 				limiter.Wait(int64(n))
 			}
-			
+
 			// 流量统计
 			if sp.session != nil {
 				if isClientToRemote {
@@ -450,12 +460,12 @@ func (sp *SocketPipe) transfer(src, dst net.Conn, isClientToRemote bool) {
 					sp.session.AddDownload(int64(n))
 				}
 			}
-			
+
 			// 设置写入超时
 			if tcpConn, ok := dst.(*net.TCPConn); ok {
 				tcpConn.SetWriteDeadline(time.Now().Add(DefaultWriteTimeout))
 			}
-			
+
 			_, err = dst.Write(buffer[:n])
 			if err != nil {
 				if err != io.EOF && !strings.Contains(err.Error(), "use of closed network connection") && !strings.Contains(err.Error(), "i/o timeout") {
@@ -471,6 +481,7 @@ func (sp *SocketPipe) transfer(src, dst net.Conn, isClientToRemote bool) {
 type SOCKS5Server struct {
 	port          int
 	auth          bool
+	authRequired  bool // 鉴权开关，控制是否强制进行认证
 	userManager   *UserManager
 	allowedIPs    map[string]bool
 	listener      net.Listener
@@ -478,28 +489,29 @@ type SOCKS5Server struct {
 	sessionID     uint64
 	mu            sync.RWMutex
 	running       bool
-	maxSessions   int // 最大连接数限制
-	currentConns  int // 当前连接数
-	connSemaphore chan struct{} // 连接数信号量
-	webPort       int // Web界面端口
+	maxSessions   int              // 最大连接数限制
+	currentConns  int              // 当前连接数
+	connSemaphore chan struct{}    // 连接数信号量
+	webPort       int              // Web界面端口
 	rateLimits    map[string]int64 // 用户限速配置
-	webServer     *http.Server // Web服务器
-	blockedUsers  map[string]bool // 被阻断的用户列表
-	blockMu       sync.RWMutex // 阻断列表的锁
+	webServer     *http.Server     // Web服务器
+	blockedUsers  map[string]bool  // 被阻断的用户列表
+	blockMu       sync.RWMutex     // 阻断列表的锁
 }
 
-func NewSOCKS5Server(port int, auth bool, userManager *UserManager, allowedIPs []string, webPort int, rateLimits map[string]int64) *SOCKS5Server {
+func NewSOCKS5Server(port int, auth bool, authRequired bool, userManager *UserManager, allowedIPs []string, webPort int, rateLimits map[string]int64) *SOCKS5Server {
 	allowedMap := make(map[string]bool)
 	for _, ip := range allowedIPs {
 		allowedMap[ip] = true
 	}
-	
+
 	maxSessions := 1000 // 默认最大1000个并发连接
 	connSemaphore := make(chan struct{}, maxSessions)
-	
+
 	return &SOCKS5Server{
 		port:          port,
 		auth:          auth,
+		authRequired:  authRequired, // 初始化鉴权开关
 		userManager:   userManager,
 		allowedIPs:    allowedMap,
 		sessions:      make(map[uint64]*Session),
@@ -517,59 +529,59 @@ func (s *SOCKS5Server) Start() error {
 	if err != nil {
 		return fmt.Errorf("failed to listen on port %d: %v", s.port, err)
 	}
-	
+
 	s.mu.Lock()
 	s.running = true
 	s.mu.Unlock()
-	
+
 	log.Printf("SOCKS5 server started on port %d", s.port)
-	
+
 	// 启动Web服务器
 	if s.webPort > 0 {
 		go s.startWebServer()
 		log.Printf("Web dashboard started on port %d", s.webPort)
 	}
-	
+
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
 			s.mu.RLock()
 			running := s.running
 			s.mu.RUnlock()
-			
+
 			if !running {
 				break
 			}
 			log.Printf("Accept error: %v", err)
 			continue
 		}
-		
+
 		go s.handleConnection(conn)
 	}
-	
+
 	return nil
 }
 
 func (s *SOCKS5Server) Stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	s.running = false
 	if s.listener != nil {
 		s.listener.Close()
 	}
-	
+
 	// 关闭Web服务器
 	if s.webServer != nil {
 		s.webServer.Close()
 	}
-	
+
 	// 关闭所有会话
 	for _, session := range s.sessions {
 		session.Close()
 	}
 	s.sessions = make(map[uint64]*Session)
-	
+
 	log.Println("SOCKS5 server stopped")
 }
 
@@ -590,7 +602,7 @@ func formatBytes(bytes int64) string {
 // startWebServer 启动Web服务器
 func (s *SOCKS5Server) startWebServer() {
 	mux := http.NewServeMux()
-	
+
 	// API端点
 	mux.HandleFunc("/api/stats", s.handleAPIStats)
 	mux.HandleFunc("/api/users", s.handleAPIUsers)
@@ -598,15 +610,15 @@ func (s *SOCKS5Server) startWebServer() {
 	mux.HandleFunc("/api/block", s.handleAPIBlock)
 	mux.HandleFunc("/api/unblock", s.handleAPIUnblock)
 	mux.HandleFunc("/api/blocked", s.handleAPIBlocked)
-	
+
 	// Web界面
 	mux.HandleFunc("/", s.handleWebDashboard)
-	
+
 	s.webServer = &http.Server{
 		Addr:    fmt.Sprintf(":%d", s.webPort),
 		Handler: mux,
 	}
-	
+
 	if err := s.webServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Printf("Web server error: %v", err)
 	}
@@ -615,7 +627,7 @@ func (s *SOCKS5Server) startWebServer() {
 // handleAPIStats 处理统计API
 func (s *SOCKS5Server) handleAPIStats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	
+
 	s.mu.RLock()
 	sessions := make([]map[string]interface{}, 0)
 	for _, session := range s.sessions {
@@ -625,20 +637,25 @@ func (s *SOCKS5Server) handleAPIStats(w http.ResponseWriter, r *http.Request) {
 		sessData["client_addr"] = session.ClientAddr
 		sessData["start_time"] = session.StartTime.Format(time.RFC3339)
 		sessData["duration"] = time.Since(session.StartTime).String()
-		
+
 		if session.Traffic != nil {
 			session.Traffic.mu.RLock()
 			sessData["upload_bytes"] = session.Traffic.UploadBytes
 			sessData["download_bytes"] = session.Traffic.DownloadBytes
 			sessData["upload_rate"] = session.Traffic.UploadRate
 			sessData["download_rate"] = session.Traffic.DownloadRate
-			sessData["targets"] = session.Traffic.Targets
+			// 修复：Targets现在是map[string]bool类型，需要转换为切片
+			targets := make([]string, 0, len(session.Traffic.Targets))
+			for t := range session.Traffic.Targets {
+				targets = append(targets, t)
+			}
+			sessData["targets"] = targets
 			session.Traffic.mu.RUnlock()
 		}
 		sessions = append(sessions, sessData)
 	}
 	s.mu.RUnlock()
-	
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"total_sessions": len(sessions),
 		"sessions":       sessions,
@@ -648,15 +665,17 @@ func (s *SOCKS5Server) handleAPIStats(w http.ResponseWriter, r *http.Request) {
 // handleAPIUsers 处理用户统计API
 func (s *SOCKS5Server) handleAPIUsers(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	
+
 	s.mu.RLock()
 	userStats := make(map[string]map[string]interface{})
+	ipStats := make(map[string]map[string]interface{}) // 按IP统计
 	for _, session := range s.sessions {
 		username := session.GetUsername()
 		if username == "" {
 			username = "anonymous"
 		}
-		
+
+		// 按用户名统计
 		if _, ok := userStats[username]; !ok {
 			userStats[username] = map[string]interface{}{
 				"username":        username,
@@ -668,23 +687,51 @@ func (s *SOCKS5Server) handleAPIUsers(w http.ResponseWriter, r *http.Request) {
 				"targets":         make([]string, 0),
 			}
 		}
-		
+
 		stats := userStats[username]
 		stats["active_sessions"] = stats["active_sessions"].(int) + 1
-		
+
+		// 按IP统计
+		clientIP := session.ClientAddr
+		if ipPort := strings.Split(clientIP, ":"); len(ipPort) > 0 {
+			clientIP = ipPort[0] // 只取IP部分，去掉端口
+		}
+
+		if _, ok := ipStats[clientIP]; !ok {
+			ipStats[clientIP] = map[string]interface{}{
+				"ip":              clientIP,
+				"active_sessions": 0,
+				"total_upload":    int64(0),
+				"total_download":  int64(0),
+				"upload_rate":     0.0,
+				"download_rate":   0.0,
+				"targets":         make([]string, 0),
+				"username":        username, // 记录用户名
+			}
+		}
+
+		ipStats[clientIP]["active_sessions"] = ipStats[clientIP]["active_sessions"].(int) + 1
+
 		if session.Traffic != nil {
 			session.Traffic.mu.RLock()
 			stats["total_upload"] = stats["total_upload"].(int64) + session.Traffic.UploadBytes
 			stats["total_download"] = stats["total_download"].(int64) + session.Traffic.DownloadBytes
 			stats["upload_rate"] = stats["upload_rate"].(float64) + session.Traffic.UploadRate
 			stats["download_rate"] = stats["download_rate"].(float64) + session.Traffic.DownloadRate
-			
+
+			// IP统计也累加流量
+			ipStats[clientIP]["total_upload"] = ipStats[clientIP]["total_upload"].(int64) + session.Traffic.UploadBytes
+			ipStats[clientIP]["total_download"] = ipStats[clientIP]["total_download"].(int64) + session.Traffic.DownloadBytes
+			ipStats[clientIP]["upload_rate"] = ipStats[clientIP]["upload_rate"].(float64) + session.Traffic.UploadRate
+			ipStats[clientIP]["download_rate"] = ipStats[clientIP]["download_rate"].(float64) + session.Traffic.DownloadRate
+
 			// 合并目标地址
 			targetsMap := make(map[string]bool)
 			for _, t := range stats["targets"].([]string) {
 				targetsMap[t] = true
 			}
-			for _, t := range session.Traffic.Targets {
+			// 修复：Targets现在是map[string]bool类型
+			for t := range session.Traffic.Targets {
 				targetsMap[t] = true
 			}
 			targets := make([]string, 0, len(targetsMap))
@@ -692,18 +739,39 @@ func (s *SOCKS5Server) handleAPIUsers(w http.ResponseWriter, r *http.Request) {
 				targets = append(targets, t)
 			}
 			stats["targets"] = targets
+
+			// IP统计也记录目标地址
+			ipTargetsMap := make(map[string]bool)
+			for _, t := range ipStats[clientIP]["targets"].([]string) {
+				ipTargetsMap[t] = true
+			}
+			for t := range session.Traffic.Targets {
+				ipTargetsMap[t] = true
+			}
+			ipTargets := make([]string, 0, len(ipTargetsMap))
+			for t := range ipTargetsMap {
+				ipTargets = append(ipTargets, t)
+			}
+			ipStats[clientIP]["targets"] = ipTargets
+
 			session.Traffic.mu.RUnlock()
 		}
 	}
 	s.mu.RUnlock()
-	
+
 	users := make([]map[string]interface{}, 0, len(userStats))
 	for _, stats := range userStats {
 		users = append(users, stats)
 	}
-	
+
+	ips := make([]map[string]interface{}, 0, len(ipStats))
+	for _, stats := range ipStats {
+		ips = append(ips, stats)
+	}
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"users": users,
+		"ips":   ips,
 	})
 }
 
@@ -721,14 +789,14 @@ func (s *SOCKS5Server) handleWebDashboard(w http.ResponseWriter, r *http.Request
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
-	
+
 	t, err := template.New("dashboard").Parse(string(content))
 	if err != nil {
 		log.Printf("Failed to parse dashboard template: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
-	
+
 	t.Execute(w, nil)
 }
 
@@ -738,19 +806,19 @@ func (s *SOCKS5Server) handleAPIBlock(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	
+
 	username := r.URL.Query().Get("username")
 	if username == "" {
 		http.Error(w, "username parameter is required", http.StatusBadRequest)
 		return
 	}
-	
+
 	s.blockMu.Lock()
 	s.blockedUsers[username] = true
 	s.blockMu.Unlock()
-	
+
 	log.Printf("[BLOCK] User %s has been blocked", username)
-	
+
 	// 关闭该用户的所有会话
 	s.mu.Lock()
 	sessionsToClose := make([]*Session, 0)
@@ -760,17 +828,17 @@ func (s *SOCKS5Server) handleAPIBlock(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.mu.Unlock()
-	
+
 	// 关闭所有相关会话
 	for _, session := range sessionsToClose {
 		log.Printf("[BLOCK] Closing session[%d] for blocked user %s", session.ID, username)
 		session.Close()
 	}
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-		"message": fmt.Sprintf("User %s has been blocked", username),
+		"success":         true,
+		"message":         fmt.Sprintf("User %s has been blocked", username),
 		"closed_sessions": len(sessionsToClose),
 	})
 }
@@ -781,19 +849,19 @@ func (s *SOCKS5Server) handleAPIUnblock(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	
+
 	username := r.URL.Query().Get("username")
 	if username == "" {
 		http.Error(w, "username parameter is required", http.StatusBadRequest)
 		return
 	}
-	
+
 	s.blockMu.Lock()
 	delete(s.blockedUsers, username)
 	s.blockMu.Unlock()
-	
+
 	log.Printf("[BLOCK] User %s has been unblocked", username)
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
@@ -804,14 +872,14 @@ func (s *SOCKS5Server) handleAPIUnblock(w http.ResponseWriter, r *http.Request) 
 // handleAPIBlocked 获取被阻断用户列表API
 func (s *SOCKS5Server) handleAPIBlocked(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	
+
 	s.blockMu.RLock()
 	blocked := make([]string, 0, len(s.blockedUsers))
 	for username := range s.blockedUsers {
 		blocked = append(blocked, username)
 	}
 	s.blockMu.RUnlock()
-	
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"blocked_users": blocked,
 	})
@@ -819,8 +887,7 @@ func (s *SOCKS5Server) handleAPIBlocked(w http.ResponseWriter, r *http.Request) 
 
 func (s *SOCKS5Server) handleConnection(conn net.Conn) {
 	clientAddr := conn.RemoteAddr().String()
-	clientIP, _, _ := net.SplitHostPort(clientAddr)
-	
+
 	// 连接数限制检查
 	select {
 	case s.connSemaphore <- struct{}{}:
@@ -833,32 +900,25 @@ func (s *SOCKS5Server) handleConnection(conn net.Conn) {
 		conn.Close()
 		return
 	}
-	
-	// IP白名单检查
-	if len(s.allowedIPs) > 0 && !s.allowedIPs[clientIP] {
-		log.Printf("Connection from %s rejected: IP not in allowed list", clientAddr)
-		conn.Close()
-		return
-	}
-	
+
 	// 设置连接超时
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		tcpConn.SetKeepAlive(true)
 		tcpConn.SetKeepAlivePeriod(30 * time.Second)
 		tcpConn.SetReadDeadline(time.Now().Add(DefaultIdleTimeout))
 	}
-	
+
 	s.mu.Lock()
 	s.sessionID++
 	session := NewSession(s.sessionID, conn)
 	s.sessions[session.ID] = session
 	s.currentConns++
 	s.mu.Unlock()
-	
+
 	defer func() {
 		duration := time.Since(session.StartTime)
 		username := session.GetUsername()
-		
+
 		// 获取流量统计
 		var uploadBytes, downloadBytes int64
 		var targets []string
@@ -866,39 +926,42 @@ func (s *SOCKS5Server) handleConnection(conn net.Conn) {
 			session.Traffic.mu.RLock()
 			uploadBytes = session.Traffic.UploadBytes
 			downloadBytes = session.Traffic.DownloadBytes
-			targets = make([]string, len(session.Traffic.Targets))
-			copy(targets, session.Traffic.Targets)
+			// 修复：Targets现在是map[string]bool类型
+			targets = make([]string, 0, len(session.Traffic.Targets))
+			for t := range session.Traffic.Targets {
+				targets = append(targets, t)
+			}
 			session.Traffic.mu.RUnlock()
 		}
-		
+
 		s.mu.Lock()
 		delete(s.sessions, session.ID)
 		s.currentConns--
 		s.mu.Unlock()
 		session.Close()
-		
+
 		// 增强的审计日志
 		if username != "" {
-			log.Printf("[AUDIT] Session[%d] user %s from %s closed (duration: %v, upload: %s, download: %s, targets: %v)", 
+			log.Printf("[AUDIT] Session[%d] user %s from %s closed (duration: %v, upload: %s, download: %s, targets: %v)",
 				session.ID, username, clientAddr, duration,
 				formatBytes(uploadBytes), formatBytes(downloadBytes), targets)
 			log.Printf("[SESSION] Session[%d] closed from %s (user: %s, duration: %v)", session.ID, clientAddr, username, duration)
 		} else {
-			log.Printf("[AUDIT] Session[%d] from %s closed (duration: %v, upload: %s, download: %s, targets: %v)", 
+			log.Printf("[AUDIT] Session[%d] from %s closed (duration: %v, upload: %s, download: %s, targets: %v)",
 				session.ID, clientAddr, duration,
 				formatBytes(uploadBytes), formatBytes(downloadBytes), targets)
 			log.Printf("[SESSION] Session[%d] closed from %s (duration: %v)", session.ID, clientAddr, duration)
 		}
 	}()
-	
+
 	log.Printf("[SESSION] Session[%d] started from %s", session.ID, clientAddr)
-	
+
 	// 协商认证方法
 	if err := s.negotiateAuth(session); err != nil {
 		log.Printf("Session[%d] auth negotiation failed: %v", session.ID, err)
 		return
 	}
-	
+
 	// 处理请求
 	if err := s.handleRequest(session); err != nil {
 		log.Printf("Session[%d] request handling failed: %v", session.ID, err)
@@ -908,22 +971,22 @@ func (s *SOCKS5Server) handleConnection(conn net.Conn) {
 
 func (s *SOCKS5Server) negotiateAuth(session *Session) error {
 	conn := session.ClientConn
-	
+
 	// 设置读取超时
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		tcpConn.SetReadDeadline(time.Now().Add(30 * time.Second))
 	}
-	
+
 	// 读取版本和方法数量
 	buf := make([]byte, 2)
 	if _, err := io.ReadFull(conn, buf); err != nil {
 		return err
 	}
-	
+
 	if buf[0] != Version {
 		return errors.New("unsupported SOCKS version")
 	}
-	
+
 	// 读取方法列表
 	nmethods := int(buf[1])
 	if nmethods == 0 || nmethods > 255 {
@@ -933,10 +996,20 @@ func (s *SOCKS5Server) negotiateAuth(session *Session) error {
 	if _, err := io.ReadFull(conn, methods); err != nil {
 		return err
 	}
-	
+
 	// 选择认证方法
 	selectedMethod := MethodNoAcceptable
-	if !s.auth {
+
+	// 如果启用了强制认证，只接受用户名密码认证
+	if s.authRequired && s.auth {
+		// 强制认证模式，检查是否支持用户名密码认证
+		for _, method := range methods {
+			if method == MethodUserPass {
+				selectedMethod = MethodUserPass
+				break
+			}
+		}
+	} else if !s.auth {
 		// 不需要认证，检查是否支持无认证
 		for _, method := range methods {
 			if method == MethodNoAuth {
@@ -945,38 +1018,48 @@ func (s *SOCKS5Server) negotiateAuth(session *Session) error {
 			}
 		}
 	} else {
-		// 需要认证，检查是否支持用户名密码认证
+		// 需要认证但非强制，优先选择用户名密码认证，否则选择无认证
 		for _, method := range methods {
 			if method == MethodUserPass {
 				selectedMethod = MethodUserPass
 				break
 			}
 		}
+
+		// 如果没有找到用户名密码认证方法且支持无认证，则选择无认证
+		if selectedMethod == MethodNoAcceptable {
+			for _, method := range methods {
+				if method == MethodNoAuth {
+					selectedMethod = MethodNoAuth
+					break
+				}
+			}
+		}
 	}
-	
+
 	// 发送选择的认证方法
 	response := []byte{Version, byte(selectedMethod)}
 	if _, err := conn.Write(response); err != nil {
 		return err
 	}
-	
+
 	if selectedMethod == MethodNoAcceptable {
 		return errors.New("no acceptable authentication method")
 	}
-	
+
 	// 如果需要用户名密码认证
 	if selectedMethod == MethodUserPass {
 		if err := s.handleUserAuth(session); err != nil {
 			return err
 		}
-		
+
 		// 检查用户是否被阻断
 		username := session.GetUsername()
 		if username != "" {
 			s.blockMu.RLock()
 			isBlocked := s.blockedUsers[username]
 			s.blockMu.RUnlock()
-			
+
 			if isBlocked {
 				log.Printf("[BLOCK] Session[%d] user %s from %s rejected: user is blocked", session.ID, username, session.ClientAddr)
 				conn := session.ClientConn
@@ -989,25 +1072,54 @@ func (s *SOCKS5Server) negotiateAuth(session *Session) error {
 				return errors.New("user is blocked")
 			}
 		}
+	} else if s.authRequired && selectedMethod == MethodNoAuth {
+		// 如果强制认证但客户端选择了无认证，则拒绝连接
+		return errors.New("authentication required")
+	} else if selectedMethod == MethodNoAuth {
+		// 无认证模式：将客户端IP地址作为用户名，便于统计和管理
+		// 无论是否启用认证，只要客户端选择了无认证方法，都使用IP作为标识
+		clientIP := session.ClientAddr
+		if ipPort := strings.Split(clientIP, ":"); len(ipPort) > 0 {
+			clientIP = ipPort[0] // 只取IP部分，去掉端口
+		}
+		session.SetUsername(clientIP)
+		log.Printf("[AUTH] Session[%d] from %s: no auth mode, using IP as username: %s", session.ID, session.ClientAddr, clientIP)
+
+		// 检查该IP是否被阻断
+		s.blockMu.RLock()
+		isBlocked := s.blockedUsers[clientIP]
+		s.blockMu.RUnlock()
+
+		if isBlocked {
+			log.Printf("[BLOCK] Session[%d] IP %s from %s rejected: IP is blocked", session.ID, clientIP, session.ClientAddr)
+			conn := session.ClientConn
+			conn.Close()
+			// 从会话列表中移除
+			s.mu.Lock()
+			delete(s.sessions, session.ID)
+			s.currentConns--
+			s.mu.Unlock()
+			return errors.New("IP is blocked")
+		}
 	}
-	
+
 	return nil
 }
 
 func (s *SOCKS5Server) handleUserAuth(session *Session) error {
 	conn := session.ClientConn
 	clientAddr := session.ClientAddr
-	
+
 	// 读取认证版本
 	buf := make([]byte, 1)
 	if _, err := io.ReadFull(conn, buf); err != nil {
 		return err
 	}
-	
+
 	if buf[0] != 0x01 { // 用户名密码认证子协商版本
 		return errors.New("unsupported auth version")
 	}
-	
+
 	// 读取用户名长度和用户名
 	if _, err := io.ReadFull(conn, buf); err != nil {
 		return err
@@ -1022,7 +1134,7 @@ func (s *SOCKS5Server) handleUserAuth(session *Session) error {
 		return err
 	}
 	usernameStr := string(username)
-	
+
 	// 读取密码长度和密码
 	if _, err := io.ReadFull(conn, buf); err != nil {
 		return err
@@ -1036,7 +1148,7 @@ func (s *SOCKS5Server) handleUserAuth(session *Session) error {
 	if _, err := io.ReadFull(conn, password); err != nil {
 		return err
 	}
-	
+
 	// 验证用户名密码
 	if s.userManager.Check(usernameStr, string(password)) {
 		// 认证成功
@@ -1060,29 +1172,29 @@ func (s *SOCKS5Server) handleUserAuth(session *Session) error {
 
 func (s *SOCKS5Server) handleRequest(session *Session) error {
 	conn := session.ClientConn
-	
+
 	// 设置读取超时
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		tcpConn.SetReadDeadline(time.Now().Add(30 * time.Second))
 	}
-	
+
 	// 读取请求头
 	header := make([]byte, 4)
 	if _, err := io.ReadFull(conn, header); err != nil {
 		return err
 	}
-	
+
 	if header[0] != Version {
 		return errors.New("unsupported SOCKS version")
 	}
-	
+
 	command := header[1]
 	// header[2] is RSV, reserved
 	addrType := header[3]
-	
+
 	var host string
 	var port int
-	
+
 	// 解析目标地址
 	switch addrType {
 	case AddrTypeIPv4:
@@ -1116,14 +1228,14 @@ func (s *SOCKS5Server) handleRequest(session *Session) error {
 		s.sendReply(session, RepAddressTypeNotSupported, nil, 0)
 		return errors.New("unsupported address type")
 	}
-	
+
 	// 读取端口
 	portBuf := make([]byte, 2)
 	if _, err := io.ReadFull(conn, portBuf); err != nil {
 		return err
 	}
 	port = int(binary.BigEndian.Uint16(portBuf))
-	
+
 	// 处理命令
 	switch command {
 	case CmdConnect:
@@ -1152,26 +1264,26 @@ func (s *SOCKS5Server) getRateLimit(username string) (int64, int64) {
 func (s *SOCKS5Server) handleConnect(session *Session, host string, port int) error {
 	username := session.GetUsername()
 	clientAddr := session.ClientAddr
-	
+
 	// 再次检查用户是否被阻断（防止在连接过程中被阻断）
 	if username != "" {
 		s.blockMu.RLock()
 		isBlocked := s.blockedUsers[username]
 		s.blockMu.RUnlock()
-		
+
 		if isBlocked {
-			log.Printf("[BLOCK] Session[%d] user %s from %s connecting to %s:%d rejected: user is blocked", 
+			log.Printf("[BLOCK] Session[%d] user %s from %s connecting to %s:%d rejected: user is blocked",
 				session.ID, username, clientAddr, host, port)
 			s.sendReply(session, RepConnectionNotAllowed, nil, 0)
 			return errors.New("user is blocked")
 		}
 	}
-	
+
 	targetAddr := fmt.Sprintf("%s:%d", host, port)
-	
+
 	// 记录目标地址
 	session.AddTarget(targetAddr)
-	
+
 	// 增强日志记录（审计）
 	if username != "" {
 		log.Printf("[AUDIT] Session[%d] user %s from %s connecting to %s:%d", session.ID, username, clientAddr, host, port)
@@ -1180,7 +1292,7 @@ func (s *SOCKS5Server) handleConnect(session *Session, host string, port int) er
 		log.Printf("[AUDIT] Session[%d] from %s connecting to %s:%d", session.ID, clientAddr, host, port)
 		log.Printf("[CONNECT] Session[%d] from %s connecting to %s:%d", session.ID, clientAddr, host, port)
 	}
-	
+
 	// 连接目标服务器（带超时）
 	connectAddr := net.JoinHostPort(host, strconv.Itoa(port))
 	dialer := &net.Dialer{
@@ -1209,24 +1321,24 @@ func (s *SOCKS5Server) handleConnect(session *Session, host string, port int) er
 		}
 		return fmt.Errorf("failed to connect to target: %v", err)
 	}
-	
+
 	// 设置远程连接的 keep-alive
 	if tcpConn, ok := remoteConn.(*net.TCPConn); ok {
 		tcpConn.SetKeepAlive(true)
 		tcpConn.SetKeepAlivePeriod(30 * time.Second)
 	}
-	
+
 	session.RemoteConn = remoteConn
-	
+
 	// 获取远程连接的本地地址
 	localAddr := remoteConn.LocalAddr().(*net.TCPAddr)
-	
+
 	// 发送成功响应
 	if err := s.sendReply(session, RepSuccess, localAddr.IP, localAddr.Port); err != nil {
 		remoteConn.Close()
 		return err
 	}
-	
+
 	if username != "" {
 		log.Printf("[AUDIT] Session[%d] user %s from %s successfully connected to %s:%d", session.ID, username, clientAddr, host, port)
 		log.Printf("[CONNECT] Session[%d] user %s from %s successfully connected to %s:%d", session.ID, username, clientAddr, host, port)
@@ -1234,28 +1346,28 @@ func (s *SOCKS5Server) handleConnect(session *Session, host string, port int) er
 		log.Printf("[AUDIT] Session[%d] from %s successfully connected to %s:%d", session.ID, clientAddr, host, port)
 		log.Printf("[CONNECT] Session[%d] from %s successfully connected to %s:%d", session.ID, clientAddr, host, port)
 	}
-	
+
 	// 获取限速配置
 	uploadRate, downloadRate := s.getRateLimit(username)
-	
+
 	// 开始数据传输（带限速和流量统计）
 	pipe := NewSocketPipe(session.ClientConn, remoteConn, session, uploadRate, downloadRate)
 	pipe.Start()
-	
+
 	// 等待传输完成（使用 Wait 而不是轮询）
 	pipe.Wait()
-	
+
 	// 连接关闭日志（审计）
 	if username != "" {
 		session.Traffic.mu.RLock()
 		uploadBytes := session.Traffic.UploadBytes
 		downloadBytes := session.Traffic.DownloadBytes
 		session.Traffic.mu.RUnlock()
-		log.Printf("[AUDIT] Session[%d] user %s from %s disconnected from %s:%d (upload: %s, download: %s)", 
-			session.ID, username, clientAddr, host, port, 
+		log.Printf("[AUDIT] Session[%d] user %s from %s disconnected from %s:%d (upload: %s, download: %s)",
+			session.ID, username, clientAddr, host, port,
 			formatBytes(uploadBytes), formatBytes(downloadBytes))
 	}
-	
+
 	return nil
 }
 
@@ -1273,12 +1385,12 @@ func (s *SOCKS5Server) handleUDPAssociate(session *Session) error {
 
 func (s *SOCKS5Server) sendReply(session *Session, rep byte, bindIP net.IP, bindPort int) error {
 	conn := session.ClientConn
-	
+
 	response := make([]byte, 4)
 	response[0] = Version
 	response[1] = rep
 	response[2] = 0x00 // RSV
-	
+
 	var addr []byte
 	if bindIP == nil {
 		// 使用0.0.0.0:0表示绑定地址不可用
@@ -1296,18 +1408,18 @@ func (s *SOCKS5Server) sendReply(session *Session, rep byte, bindIP net.IP, bind
 		}
 		binary.BigEndian.PutUint16(addr[len(addr)-2:], uint16(bindPort))
 	}
-	
+
 	// 设置写入超时
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		tcpConn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	}
-	
+
 	// 合并响应头和地址信息，一次性写入（减少系统调用）
 	fullResponse := append(response, addr...)
 	if _, err := conn.Write(fullResponse); err != nil {
 		return err
 	}
-	
+
 	return nil
 }
 
@@ -1331,29 +1443,29 @@ func readPIDFile(pidFile string) (int, error) {
 
 func stopServer(pidFile string) {
 	fmt.Print("Stopping server... ")
-	
+
 	pid, err := readPIDFile(pidFile)
 	if err != nil {
 		fmt.Println("server is not running")
 		return
 	}
-	
+
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		fmt.Println("server is not running")
 		os.Remove(pidFile)
 		return
 	}
-	
+
 	// 发送SIGTERM信号
 	if err := process.Signal(syscall.SIGTERM); err != nil {
 		fmt.Println("failed to stop server")
 		return
 	}
-	
+
 	// 等待进程退出
 	time.Sleep(2 * time.Second)
-	
+
 	// 检查进程是否还在运行
 	if err := process.Signal(syscall.Signal(0)); err != nil {
 		os.Remove(pidFile)
@@ -1369,13 +1481,13 @@ func statusServer(pidFile string) {
 		fmt.Println("server is stopped")
 		return
 	}
-	
+
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		fmt.Println("server is stopped")
 		return
 	}
-	
+
 	// 检查进程是否在运行
 	if err := process.Signal(syscall.Signal(0)); err != nil {
 		fmt.Println("server is stopped")
@@ -1410,9 +1522,9 @@ func main() {
 		showHelp()
 		return
 	}
-	
+
 	command := os.Args[1]
-	
+
 	// 定义命令行标志
 	portFlag := flag.Int("port", 1080, "Server port")
 	configFlag := flag.String("config", "", "Configuration file path")
@@ -1420,10 +1532,10 @@ func main() {
 	allowedFlag := flag.String("allowed", "", "Allowed IPs")
 	logFlag := flag.Bool("log", true, "Enable logging")
 	pidFileFlag := flag.String("pidfile", "/tmp/gosocks5.pid", "PID file path")
-	
+
 	// 重新解析标志，跳过命令参数
 	flag.CommandLine.Parse(os.Args[2:])
-	
+
 	switch command {
 	case "start":
 		startServer(*portFlag, *configFlag, *authFlag, *allowedFlag, *logFlag, *pidFileFlag)
@@ -1445,17 +1557,17 @@ func loadConfig(configPath string) (*Config, error) {
 	if configPath == "" {
 		return nil, nil
 	}
-	
+
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %v", err)
 	}
-	
+
 	var config Config
 	if err := json.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %v", err)
 	}
-	
+
 	return &config, nil
 }
 
@@ -1466,14 +1578,15 @@ func startServer(port int, configPath, authStr, allowedStr string, enableLog boo
 	} else {
 		log.SetFlags(log.LstdFlags | log.Lshortfile)
 	}
-	
+
 	// 创建用户管理器
 	userManager := NewUserManager()
 	authEnabled := false
+	authRequired := false // 默认不强制认证
 	var allowedIPs []string
 	var webPort int
 	var rateLimits map[string]int64
-	
+
 	// 优先从配置文件加载
 	if configPath != "" {
 		config, err := loadConfig(configPath)
@@ -1482,17 +1595,17 @@ func startServer(port int, configPath, authStr, allowedStr string, enableLog boo
 			log.Println("Falling back to command line arguments")
 		} else {
 			log.Printf("Configuration loaded from %s", configPath)
-			
+
 			// 使用配置文件中的端口（如果提供了）
 			if config.Port > 0 {
 				port = config.Port
 			}
-			
+
 			// 从配置文件加载Web端口
 			if config.WebPort > 0 {
 				webPort = config.WebPort
 			}
-			
+
 			// 从配置文件加载认证信息
 			if config.Auth && len(config.Users) > 0 {
 				authEnabled = true
@@ -1504,12 +1617,15 @@ func startServer(port int, configPath, authStr, allowedStr string, enableLog boo
 					log.Printf("Loaded user from config: %s", user.Username)
 				}
 			}
-			
+
+			// 从配置文件加载鉴权开关
+			authRequired = config.AuthRequired
+
 			// 从配置文件加载 IP 白名单
 			if len(config.Allowed) > 0 {
 				allowedIPs = config.Allowed
 			}
-			
+
 			// 从配置文件加载限速配置
 			if config.RateLimits != nil {
 				rateLimits = config.RateLimits
@@ -1517,7 +1633,7 @@ func startServer(port int, configPath, authStr, allowedStr string, enableLog boo
 			}
 		}
 	}
-	
+
 	// 如果配置文件没有提供认证信息，则使用命令行参数（向后兼容）
 	if !authEnabled && authStr != "" {
 		authEnabled = true
@@ -1533,31 +1649,36 @@ func startServer(port int, configPath, authStr, allowedStr string, enableLog boo
 			}
 		}
 	}
-	
+
 	// 如果配置文件没有提供 IP 白名单，则使用命令行参数
 	if len(allowedIPs) == 0 && allowedStr != "" {
 		allowedIPs = strings.Split(allowedStr, ",")
 	}
-	
+
 	if authEnabled {
 		log.Printf("Authentication enabled with %d user(s)", userManager.GetUserCount())
+		if authRequired {
+			log.Println("Authentication required for all connections")
+		} else {
+			log.Println("Authentication optional (anonymous connections allowed)")
+		}
 	} else {
 		log.Println("Authentication disabled")
 	}
-	
+
 	// 创建服务器
-	server := NewSOCKS5Server(port, authEnabled, userManager, allowedIPs, webPort, rateLimits)
-	
+	server := NewSOCKS5Server(port, authEnabled, authRequired, userManager, allowedIPs, webPort, rateLimits)
+
 	// 写入PID文件
 	if err := writePIDFile(pidFile); err != nil {
 		log.Printf("Failed to write PID file: %v", err)
 		return
 	}
-	
+
 	// 设置信号处理
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	
+
 	go func() {
 		<-sigCh
 		log.Println("Received shutdown signal")
@@ -1565,7 +1686,7 @@ func startServer(port int, configPath, authStr, allowedStr string, enableLog boo
 		os.Remove(pidFile)
 		os.Exit(0)
 	}()
-	
+
 	// 启动服务器
 	log.Printf("Starting SOCKS5 server on port %d", port)
 	if err := server.Start(); err != nil {
